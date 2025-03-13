@@ -65,6 +65,8 @@ Our pre-alpha build establishes the foundation for a three-component system:
 4. **Scale Limitations**: Current demonstrations are small-scale only
    - *Plans*: Incremental scaling from phone demo to tablet to full-size implementation
 
+## No known Bugs as of right now!
+
 ## Setup & Usage
 
 ### System Requirements

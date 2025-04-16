@@ -1,0 +1,29 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 11.00
+# Visual Studio 2010
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Pepper-s-Cone-Unity", "Assembly-CSharp.csproj", "{CE476086-7DB3-C92F-E213-18504C1CC0C0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Pepper-s-Cone-Unity", "Assembly-CSharp-Editor.csproj", "{3C94DFD1-8F30-3AD2-A645-3D85DBDA8FC6}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{CE476086-7DB3-C92F-E213-18504C1CC0C0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CE476086-7DB3-C92F-E213-18504C1CC0C0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CE476086-7DB3-C92F-E213-18504C1CC0C0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CE476086-7DB3-C92F-E213-18504C1CC0C0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3C94DFD1-8F30-3AD2-A645-3D85DBDA8FC6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3C94DFD1-8F30-3AD2-A645-3D85DBDA8FC6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3C94DFD1-8F30-3AD2-A645-3D85DBDA8FC6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3C94DFD1-8F30-3AD2-A645-3D85DBDA8FC6}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(MonoDevelopProperties) = preSolution
+		StartupItem = Assembly-CSharp.csproj
+	EndGlobalSection
+EndGlobal

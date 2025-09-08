@@ -1,60 +1,83 @@
 import cv2
 import numpy as np
+import mediapipe as mp
 
 # === CONFIG ===
-input_path = 'IMG_8823.png'  # Replace with your image name
-output_path = 'curved_horizontal_wrap.png'
+input_path = "IMG_8823.png"
+output_path = "cone_warp_image.png"
+
+frame_size = 300
+canvas_size = 600
+subject_scale = 0.6
 
 # === STEP 1: Load image ===
 img = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
 if img is None:
-    raise ValueError("Couldn't load image. Check the filename!")
+    raise ValueError("Could not load image.")
 
-# Separate BGR and alpha
+# Ensure we have BGR
 if img.shape[2] == 4:
     bgr = img[:, :, :3]
-    alpha = img[:, :, 3]
 else:
     bgr = img
-    alpha = np.ones(bgr.shape[:2], dtype=np.uint8) * 255
 
-# === STEP 2: Prepare canvas ===
-h, w = bgr.shape[:2]
-canvas_w = 2 * w
-canvas_h = h
-canvas_bgr = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-canvas_alpha = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+# === STEP 2: Remove background with MediaPipe ===
+mp_selfie_segmentation = mp.solutions.selfie_segmentation
+with mp_selfie_segmentation.SelfieSegmentation(model_selection=1) as segmentor:
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    result = segmentor.process(rgb)
+    mask = result.segmentation_mask > 0.5
 
-# Center image on black canvas
-x_offset = (canvas_w - w) // 2
-canvas_bgr[:, x_offset:x_offset+w] = bgr
-canvas_alpha[:, x_offset:x_offset+w] = alpha
+bg_removed = np.zeros_like(bgr)
+bg_removed[mask] = bgr[mask]
 
-# === STEP 3: Create horizontal warp (imaginary circle) ===
-radius = canvas_w / 2.0
-amplitude = h / 4.0  # how much it curves vertically (adjust as needed)
+# === STEP 3: Center + scale subject in square frame ===
+src_frame = np.zeros((frame_size, frame_size, 3), dtype=np.uint8)
 
-map_x = np.zeros((canvas_h, canvas_w), dtype=np.float32)
-map_y = np.zeros((canvas_h, canvas_w), dtype=np.float32)
+h, w = bg_removed.shape[:2]
+fit_scale = min(frame_size / max(h, w), 1.0) * subject_scale
+new_w, new_h = max(1, int(w * fit_scale)), max(1, int(h * fit_scale))
 
-for y in range(canvas_h):
-    for x in range(canvas_w):
-        dx = (x - canvas_w / 2) / radius  # from -1 to 1
-        angle = dx * np.pi / 2  # only bend 90° arc max
-        offset = np.sin(angle) * amplitude
-        map_x[y, x] = x
-        map_y[y, x] = np.clip(y - offset, 0, canvas_h - 1)
+resized = cv2.resize(bg_removed, (new_w, new_h), interpolation=cv2.INTER_AREA)
+y_off = (frame_size - new_h) // 2
+x_off = (frame_size - new_w) // 2
+src_frame[y_off : y_off + new_h, x_off : x_off + new_w] = resized
 
-# === STEP 4: Remap image ===
-warped_bgr = cv2.remap(canvas_bgr, map_x, map_y, interpolation=cv2.INTER_LINEAR)
-warped_alpha = cv2.remap(canvas_alpha, map_x, map_y, interpolation=cv2.INTER_LINEAR)
+# === STEP 4: Build cone warp map (same as live) ===
+map_x = np.zeros((canvas_size, canvas_size), dtype=np.float32)
+map_y = np.zeros((canvas_size, canvas_size), dtype=np.float32)
 
-# === STEP 5: Combine BGR and alpha on black ===
-final_img = np.zeros_like(warped_bgr)
-mask = warped_alpha > 0
-for c in range(3):
-    final_img[:, :, c][mask] = warped_bgr[:, :, c][mask]
+center_x = canvas_size // 2
+center_y = canvas_size // 2
+max_radius = canvas_size // 2
+
+for y in range(canvas_size):
+    dy = y - center_y
+    for x in range(canvas_size):
+        dx = x - center_x
+        radius = np.sqrt(dx * dx + dy * dy)
+        if radius > max_radius:
+            map_x[y, x] = 0
+            map_y[y, x] = 0
+            continue
+
+        angle = np.arctan2(dy, dx)
+        if -np.pi / 2 <= angle <= np.pi / 2:
+            norm_angle = (angle + (np.pi / 2)) / np.pi
+            norm_radius = 1.0 - (radius / max_radius)
+
+            src_x = norm_angle * (frame_size - 1)
+            src_y = norm_radius * (frame_size - 1)
+
+            map_x[y, x] = src_x
+            map_y[y, x] = src_y
+        else:
+            map_x[y, x] = 0
+            map_y[y, x] = 0
+
+# === STEP 5: Warp the image ===
+warped = cv2.remap(src_frame, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
 
 # === STEP 6: Save result ===
-cv2.imwrite(output_path, final_img)
-print(f"✅ Saved to: {output_path}")
+cv2.imwrite(output_path, warped)
+print(f"Saved warped image with background removed: {output_path}")

@@ -3,8 +3,8 @@ import numpy as np
 import mediapipe as mp
 
 # === CONFIGURATION ===
-frame_size = 300           # Webcam frame input resolution
-canvas_size = 600          # Output display resolution
+frame_size = 400           # Webcam frame input resolution
+canvas_size = 800          # Output display resolution
 
 # === VIDEO SETUP ===
 cap = cv2.VideoCapture(0)
@@ -13,6 +13,35 @@ if not cap.isOpened():
 
 mp_selfie_segmentation = mp.solutions.selfie_segmentation
 segmentor = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
+
+# === ENHANCEMENT FUNCTION ===
+def enhance_saturation_contrast(image, saturation_scale=1.3, contrast_alpha=1.2, brightness_beta=10):
+    """
+    Enhance the saturation and contrast of an image.
+    
+    Args:
+        image: Input BGR image
+        saturation_scale: Multiplier for saturation (1.0 = no change, >1.0 = more saturated)
+        contrast_alpha: Contrast multiplier (1.0 = no change, >1.0 = more contrast)
+        brightness_beta: Brightness offset (-100 to 100, 0 = no change)
+    
+    Returns:
+        Enhanced BGR image
+    """
+    # Convert to HSV for saturation adjustment
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
+    
+    # Enhance saturation (S channel)
+    hsv[:, :, 1] = hsv[:, :, 1] * saturation_scale
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
+    
+    # Convert back to BGR
+    enhanced = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    
+    # Apply contrast and brightness adjustment
+    enhanced = cv2.convertScaleAbs(enhanced, alpha=contrast_alpha, beta=brightness_beta)
+    
+    return enhanced
 
 # === GENERATE CONE WARP MAP ===
 map_x = np.zeros((canvas_size, canvas_size), dtype=np.float32)
@@ -76,8 +105,11 @@ while True:
     # === APPLY CONE WARP ===
     warped = cv2.remap(padded, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
 
+    # === ENHANCE SATURATION AND CONTRAST ===
+    enhanced = enhance_saturation_contrast(warped, saturation_scale=1.4, contrast_alpha=1.8, brightness_beta=-25)
+
     # === DISPLAY ===
-    cv2.imshow("Pepper's Cone Preview", warped)
+    cv2.imshow("Pepper's Cone Preview", enhanced)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 

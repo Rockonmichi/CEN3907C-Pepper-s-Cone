@@ -1,11 +1,13 @@
 # studio_main.py
 import tkinter as tk
 from tkinter import ttk
-from upload_view import UploadView      # existing upload screen
-from record_view import RecordView      # <-- NEW: separate record screen
+from upload_view import UploadView  # existing upload screen
+from record_view import RecordView  # separate record screen
+from live_view import LiveView  # live streaming screen
 
-APP_TITLE = "Live & Upload — Stub"
+APP_TITLE = "Live & Upload Studio"
 APP_WIDTH, APP_HEIGHT = 560, 380
+
 
 class StudioApp(tk.Tk):
     def __init__(self):
@@ -21,7 +23,7 @@ class StudioApp(tk.Tk):
         self.container.grid_columnconfigure(0, weight=1)
 
         self.pages = {}
-        for Page in (HomePage, LiveStub, UploadView, RecordView):  # include RecordView
+        for Page in (HomePage, LiveView, UploadView, RecordView):
             page = Page(parent=self.container, controller=self)
             self.pages[Page.__name__] = page
             page.grid(row=0, column=0, sticky="nsew")
@@ -36,6 +38,7 @@ class StudioApp(tk.Tk):
     def show_page(self, name: str):
         self.pages[name].tkraise()
 
+
 class HomePage(ttk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
@@ -45,12 +48,9 @@ class HomePage(ttk.Frame):
         subtitle = ttk.Label(self, text="Choose what you want to do:", style="Body.TLabel")
 
         buttons = ttk.Frame(self)
-        live_btn = ttk.Button(buttons, text="🎥  Live Stream",
-                              command=lambda: controller.show_page("LiveStub"))
-        record_btn = ttk.Button(buttons, text="🎬  Record Video",
-                                command=lambda: controller.show_page("RecordView"))   # <—
-        upload_btn = ttk.Button(buttons, text="📤  Upload Video",
-                                command=lambda: controller.show_page("UploadView"))
+        live_btn = ttk.Button(buttons, text="Live Stream", command=lambda: controller.show_page("LiveView"))
+        record_btn = ttk.Button(buttons, text="Record Video", command=lambda: controller.show_page("RecordView"))
+        upload_btn = ttk.Button(buttons, text="Upload Video", command=lambda: controller.show_page("UploadView"))
 
         header.pack(pady=(10, 4))
         subtitle.pack(pady=(0, 16))
@@ -60,17 +60,6 @@ class HomePage(ttk.Frame):
         record_btn.grid(row=0, column=1, padx=8, pady=8, ipadx=20, ipady=10)
         upload_btn.grid(row=0, column=2, padx=8, pady=8, ipadx=20, ipady=10)
 
-class LiveStub(ttk.Frame):
-    def __init__(self, parent, controller):
-        super().__init__(parent)
-        self.controller = controller
-        title = ttk.Label(self, text="Live Stream (stub)", style="Header.TLabel")
-        desc = ttk.Label(self, text="This is a placeholder screen.\nHook up real live-stream logic later.", style="Body.TLabel")
-        back = ttk.Button(self, text="← Back", command=lambda: controller.show_page("HomePage"))
-
-        title.pack(pady=(10, 8))
-        desc.pack(pady=(0, 20))
-        back.pack()
 
 if __name__ == "__main__":
     app = StudioApp()

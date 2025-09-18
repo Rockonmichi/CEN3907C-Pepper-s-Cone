@@ -11,6 +11,9 @@ import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+import numpy as np
+import mediapipe as mp
+
 import cv2
 from PIL import Image, ImageTk
 
@@ -18,7 +21,51 @@ from PIL import Image, ImageTk
 PREVIEW_W = 800
 PREVIEW_H = 450
 
-# ---------- Backends (match record_view) ----------
+FRAME_SIZE = 400
+CANVAS_SIZE = 800
+
+# ---------- Warp Helpers ----------
+def enhance_saturation_contrast(image_bgr, saturation_scale=1.3, contrast_alpha=1.2, brightness_beta=10):
+    # BGR → HSV (float), boost S, back to BGR, then contrast/brightness
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation_scale, 0, 255)
+    enhanced = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    enhanced = cv2.convertScaleAbs(enhanced, alpha=contrast_alpha, beta=brightness_beta)
+    return enhanced
+
+
+def build_cone_maps(frame_size: int, canvas_size: int):
+    """Precompute map_x, map_y for a circular cone warp like your prototype."""
+    map_x = np.zeros((canvas_size, canvas_size), dtype=np.float32)
+    map_y = np.zeros((canvas_size, canvas_size), dtype=np.float32)
+
+    cx = cy = canvas_size // 2
+    max_r = canvas_size // 2
+
+    for y in range(canvas_size):
+        dy = y - cy
+        for x in range(canvas_size):
+            dx = x - cx
+            r = np.hypot(dx, dy)
+            if r > max_r:
+                continue
+            angle = np.arctan2(dy, dx)  # -pi..pi
+            if -np.pi / 2 <= angle <= np.pi / 2:
+                # angle → [0..1], radius (flipped) → [0..1]
+                norm_angle = (angle + (np.pi / 2)) / np.pi
+                norm_radius = 1.0 - (r / max_r)
+
+                sx = int(np.clip(norm_angle * frame_size, 0, frame_size - 1))
+                sy = int(np.clip(norm_radius * frame_size, 0, frame_size - 1))
+                map_x[y, x] = sx
+                map_y[y, x] = sy
+            else:
+                map_x[y, x] = 0
+                map_y[y, x] = 0
+    return map_x, map_y
+
+
+# ---------- Backends ----------
 BACKENDS = [
     ("MSMF (Windows 10/11)", cv2.CAP_MSMF),
     ("DSHOW (DirectShow)", cv2.CAP_DSHOW),
@@ -72,7 +119,7 @@ def _list_dshow_devices_via_ffmpeg():
                 seen.add(x)
                 out.append(x)
         return out
-
+    
     return dedup(video), dedup(audio)
 
 
@@ -95,7 +142,7 @@ class LiveView(ttk.Frame):
         right = ttk.Frame(top)
         right.pack(side="right", fill="both", expand=True, padx=(8, 0))
 
-        # --- Camera selection (grid to keep positions consistent like original) ---
+        # --- Camera selection ---
         cam_box = ttk.LabelFrame(left, text="Camera Selection")
         cam_box.pack(fill="x", padx=4, pady=(0, 10))
         cam_box.grid_columnconfigure(0, weight=1)
@@ -104,7 +151,7 @@ class LiveView(ttk.Frame):
         r1 = ttk.Radiobutton(cam_box, text="By Index", variable=self.sel_mode, value="index", command=self._update_controls)
         r2 = ttk.Radiobutton(cam_box, text="By Name (DSHOW)", variable=self.sel_mode, value="name", command=self._update_controls)
 
-        # index row (friendly labels + rescan)
+        # index row
         idx_row = ttk.Frame(cam_box)
         ttk.Label(idx_row, text="Index:").grid(row=0, column=0, padx=(0, 6))
         self.idx_combo = ttk.Combobox(idx_row, state="readonly", width=36, values=self._scan_indices())
@@ -126,7 +173,7 @@ class LiveView(ttk.Frame):
         self.names_combo.grid(row=1, column=1, pady=(6, 0), sticky="w")
         ttk.Button(name_row, text="Use Selected", command=self._use_selected_name).grid(row=1, column=2, padx=6, pady=(6, 0))
 
-        # Arrange like the original: radio, its row; radio, its row
+        # Arrange like: radio, its row; radio, its row
         r1.grid(row=0, column=0, sticky="w", padx=8, pady=(6, 2))
         idx_row.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
         r2.grid(row=2, column=0, sticky="w", padx=8, pady=(8, 2))
@@ -186,6 +233,11 @@ class LiveView(ttk.Frame):
         self._fs_label = None
         self._fs_img = None
         self._fs_running = False
+        
+        # Precompute warp maps (once)
+        self._map_x, self._map_y = build_cone_maps(FRAME_SIZE, CANVAS_SIZE)
+        self._segmentor = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+
 
         # init
         self._update_controls()
@@ -312,10 +364,10 @@ class LiveView(ttk.Frame):
                 with self._frame_lock:
                     self._last_bgr = frame
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Preview error", str(e)))
+            self.after(0, lambda e=e: messagebox.showerror("Preview error", str(e)))
 
     def _preview_tick(self):
-        """Paint latest frame into the preview pane (fit inside fixed box)."""
+        """Show RAW camera frame (unwarped) in the small preview pane."""
         frame = None
         with self._frame_lock:
             if self._last_bgr is not None:
@@ -324,13 +376,12 @@ class LiveView(ttk.Frame):
         if frame is not None:
             fh, fw = frame.shape[:2]
             scale = min(PREVIEW_W / fw, PREVIEW_H / fh)
-            new_w, new_h = max(1, int(fw * scale)), max(1, int(fh * scale))
+            new_w = max(1, int(fw * scale))
+            new_h = max(1, int(fh * scale))
             resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-            # Optional: show your transform in preview too
-            warped = self._apply_warp(resized)
-
-            rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+            # IMPORTANT: no warp here — preview shows the unwarped camera feed
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
             img = ImageTk.PhotoImage(Image.fromarray(rgb))
             self._preview_label.config(image=img)
             self._preview_label.image = img  # keep a reference
@@ -408,7 +459,53 @@ class LiveView(ttk.Frame):
         # Aim ~60 Hz for smoother motion; adjust as needed
         self.after(16, self._fullscreen_tick)
 
-    # ---------- Warp placeholder ----------
+    
+    # ---------- Warp Display ----------
     def _apply_warp(self, frame_bgr):
-        
-        return frame_bgr
+        """
+        Takes a BGR frame from the camera, returns a warped BGR image.
+        Steps mirror your CircularConeLive.py:
+        - resize to FRAME_SIZE x FRAME_SIZE
+        - optional background removal (MediaPipe)
+        - center/scale subject
+        - remap with precomputed circular-cone maps
+        - saturation/contrast enhancement
+        """
+        # 1) square input
+        sq = cv2.resize(frame_bgr, (FRAME_SIZE, FRAME_SIZE), interpolation=cv2.INTER_AREA)
+
+        # 2) optional background removal
+        if self._segmentor is not None:
+            rgb = cv2.cvtColor(sq, cv2.COLOR_BGR2RGB)
+            try:
+                seg = self._segmentor.process(rgb)
+                mask = (seg.segmentation_mask > 0.5)
+                fg = np.zeros_like(sq)
+                fg[mask] = sq[mask]
+            except Exception:
+                fg = sq
+        else:
+            fg = sq
+
+        # 3) center + scale (same defaults as prototype: 0.6)
+        scale = 0.6
+        scaled = cv2.resize(fg, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        padded = np.zeros_like(fg)
+        y_off = (FRAME_SIZE - scaled.shape[0]) // 2
+        x_off = (FRAME_SIZE - scaled.shape[1]) // 2
+        padded[y_off:y_off + scaled.shape[0], x_off:x_off + scaled.shape[1]] = scaled
+
+        # 4) cone warp
+        warped = cv2.remap(
+            padded, self._map_x, self._map_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0)
+        )
+
+        # 5) color pop
+        enhanced = enhance_saturation_contrast(
+            warped, saturation_scale=1.4, contrast_alpha=1.8, brightness_beta=-25
+        )
+
+        return enhanced
+

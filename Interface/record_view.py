@@ -6,7 +6,7 @@ import threading
 import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk   
+from PIL import Image, ImageTk
 
 
 import cv2
@@ -14,9 +14,10 @@ import cv2
 # ---------- Backends ----------
 BACKENDS = [
     ("MSMF (Windows 10/11)", cv2.CAP_MSMF),
-    ("DSHOW (DirectShow)",   cv2.CAP_DSHOW),
+    ("DSHOW (DirectShow)", cv2.CAP_DSHOW),
     ("ANY (let OpenCV pick)", cv2.CAP_ANY),
 ]
+
 
 def _open_by_index(index: int, api_pref: int):
     cap = cv2.VideoCapture(index, api_pref)
@@ -25,6 +26,7 @@ def _open_by_index(index: int, api_pref: int):
     cap.release()
     return None, None, None
 
+
 def _open_by_name_dshow(name: str):
     src = f"video={name}"
     cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
@@ -32,6 +34,7 @@ def _open_by_name_dshow(name: str):
         return cap, "name", cv2.CAP_DSHOW
     cap.release()
     return None, None, None
+
 
 def _enumerate_indices(max_probe=6):
     found = []
@@ -44,12 +47,10 @@ def _enumerate_indices(max_probe=6):
                 break
     return found
 
+
 def _list_dshow_devices_via_ffmpeg():
     try:
-        proc = subprocess.Popen(
-            ["ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
+        proc = subprocess.Popen(["ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         out, _ = proc.communicate(timeout=6)
     except Exception:
         return [], []
@@ -59,9 +60,11 @@ def _list_dshow_devices_via_ffmpeg():
     for line in out.splitlines():
         line = line.strip()
         if "DirectShow video devices" in line:
-            current = "video"; continue
+            current = "video"
+            continue
         if "DirectShow audio devices" in line:
-            current = "audio"; continue
+            current = "audio"
+            continue
         if line.startswith('"') and line.endswith('"'):
             name = line.strip('"')
             if current == "video":
@@ -78,6 +81,7 @@ class RecordView(ttk.Frame):
     - Records to MP4 (video only) via OpenCV VideoWriter.
     - Shows a live preview while recording (no Pillow required).
     """
+
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
@@ -105,18 +109,17 @@ class RecordView(ttk.Frame):
         r2 = ttk.Radiobutton(cam_mode, text="By Name (DSHOW)", variable=self.sel_mode, value="name", command=self._update_controls)
 
         idx_row = ttk.Frame(cam_mode)
-        ttk.Label(idx_row, text="Index:").grid(row=0, column=0, padx=(0,6))
+        ttk.Label(idx_row, text="Index:").grid(row=0, column=0, padx=(0, 6))
         self.idx_combo = ttk.Combobox(idx_row, state="readonly", width=20, values=["(scan...)"])
         self.idx_combo.set("(scan...)")
         self.btn_scan_idx = ttk.Button(idx_row, text="Scan Indices", command=self.scan_indices)
 
-        ttk.Label(idx_row, text="Backend:").grid(row=0, column=3, padx=(12,6))
-        self.backend_combo = ttk.Combobox(idx_row, state="readonly",
-                                          values=[label for (label, _) in BACKENDS], width=22)
+        ttk.Label(idx_row, text="Backend:").grid(row=0, column=3, padx=(12, 6))
+        self.backend_combo = ttk.Combobox(idx_row, state="readonly", values=[label for (label, _) in BACKENDS], width=22)
         self.backend_combo.set(BACKENDS[0][0])
 
         name_row = ttk.Frame(cam_mode)
-        ttk.Label(name_row, text="Device Name:").grid(row=0, column=0, padx=(0,6))
+        ttk.Label(name_row, text="Device Name:").grid(row=0, column=0, padx=(0, 6))
         self.name_entry = ttk.Entry(name_row, width=36)
         self.btn_list_names = ttk.Button(name_row, text="List Cameras (ffmpeg)", command=self.list_names_ffmpeg)
         self.names_combo = ttk.Combobox(name_row, state="readonly", width=36, values=[])
@@ -139,13 +142,12 @@ class RecordView(ttk.Frame):
         settings = ttk.LabelFrame(left, text="Settings")
         settings.pack(fill="x", padx=4, pady=(0, 10))
 
-        ttk.Label(settings, text="Resolution:").grid(row=0, column=0, padx=(8,6), pady=8, sticky="w")
-        self.res_combo = ttk.Combobox(settings, state="readonly", width=12,
-                                      values=["1280x720", "1920x1080", "640x480"])
+        ttk.Label(settings, text="Resolution:").grid(row=0, column=0, padx=(8, 6), pady=8, sticky="w")
+        self.res_combo = ttk.Combobox(settings, state="readonly", width=12, values=["1280x720", "1920x1080", "640x480"])
         self.res_combo.set("1280x720")
         self.res_combo.grid(row=0, column=1, sticky="w")
 
-        ttk.Label(settings, text="FPS:").grid(row=0, column=2, padx=(16,6), pady=8, sticky="w")
+        ttk.Label(settings, text="FPS:").grid(row=0, column=2, padx=(16, 6), pady=8, sticky="w")
         self.fps_entry = ttk.Entry(settings, width=6)
         self.fps_entry.insert(0, "30")
         self.fps_entry.grid(row=0, column=3, sticky="w")
@@ -156,23 +158,25 @@ class RecordView(ttk.Frame):
         self.out_path = tk.StringVar(value="No file selected.")
         out_btn = ttk.Button(out_row, text="Choose Output (.mp4)", command=self.choose_output)
         out_lbl = ttk.Label(out_row, textvariable=self.out_path, width=48)
-        out_btn.grid(row=0, column=0, padx=(0,8))
+        out_btn.grid(row=0, column=0, padx=(0, 8))
         out_lbl.grid(row=0, column=1, sticky="w")
 
         # ----- Controls (left) -----
-        ctrl = ttk.Frame(left); ctrl.pack(pady=(4, 8))
+        ctrl = ttk.Frame(left)
+        ctrl.pack(pady=(4, 8))
         self.btn_start = ttk.Button(ctrl, text="Start Recording", command=self.start_record, state="disabled")
-        self.btn_stop  = ttk.Button(ctrl, text="Stop Recording",  command=self.stop_record, state="disabled")
-        back_btn       = ttk.Button(ctrl, text="← Back", command=lambda: self.controller.show_page("HomePage"))
+        self.btn_stop = ttk.Button(ctrl, text="Stop Recording", command=self.stop_record, state="disabled")
+        back_btn = ttk.Button(ctrl, text="← Back", command=lambda: self.controller.show_page("HomePage"))
         self.btn_start.grid(row=0, column=0, padx=6)
         self.btn_stop.grid(row=0, column=1, padx=6)
         back_btn.grid(row=0, column=2, padx=6)
 
         # ----- Status (left) -----
-        status_row = ttk.Frame(left); status_row.pack()
+        status_row = ttk.Frame(left)
+        status_row.pack()
         self.status = tk.StringVar(value="Status: idle")
         self.frames = tk.StringVar(value="Frames: 0")
-        ttk.Label(status_row, textvariable=self.status).grid(row=0, column=0, padx=(0,12))
+        ttk.Label(status_row, textvariable=self.status).grid(row=0, column=0, padx=(0, 12))
         ttk.Label(status_row, textvariable=self.frames).grid(row=0, column=1)
 
         # ----- Preview (right) -----
@@ -181,8 +185,8 @@ class RecordView(ttk.Frame):
         self.preview_h = 180  # 16:9 default; will adapt
         self._preview_label = tk.Label(right, bg="#000", width=self.preview_w, height=self.preview_h)
         self._preview_label.pack(padx=4, pady=4)
-        self._preview_img = None   # keep reference to avoid GC
-        self._last_bgr = None      # latest frame (BGR) from record loop
+        self._preview_img = None  # keep reference to avoid GC
+        self._last_bgr = None  # latest frame (BGR) from record loop
         self._frame_lock = threading.Lock()
 
         # runtime vars
@@ -219,12 +223,15 @@ class RecordView(ttk.Frame):
         self.btn_start.config(state="normal" if (has_output and has_camera) else "disabled")
 
     def scan_indices(self):
-        self.idx_combo["values"] = ["(scanning...)"]; self.idx_combo.set("(scanning...)")
+        self.idx_combo["values"] = ["(scanning...)"]
+        self.idx_combo.set("(scanning...)")
         self.status.set("Status: scanning indices...")
+
         def _scan():
             found = _enumerate_indices(8)
             vals = [f"{i} ({backend})" for i, backend in found] or ["(no indices)"]
             self.after(0, lambda: self._apply_idx_scan(vals))
+
         threading.Thread(target=_scan, daemon=True).start()
 
     def _apply_idx_scan(self, values):
@@ -250,11 +257,7 @@ class RecordView(ttk.Frame):
         self._update_start_enabled()
 
     def choose_output(self):
-        path = filedialog.asksaveasfilename(
-            title="Save recorded video",
-            defaultextension=".mp4",
-            filetypes=[("MP4 video", "*.mp4"), ("AVI", "*.avi"), ("All files", "*.*")]
-        )
+        path = filedialog.asksaveasfilename(title="Save recorded video", defaultextension=".mp4", filetypes=[("MP4 video", "*.mp4"), ("AVI", "*.avi"), ("All files", "*.*")])
         if path:
             self.out_path.set(path)
         self._update_start_enabled()
@@ -304,16 +307,17 @@ class RecordView(ttk.Frame):
         except Exception:
             width, height = 1280, 720
         try:
-            fps = int(self.fps_entry.get()); fps = max(1, fps)
+            fps = int(self.fps_entry.get())
+            fps = max(1, fps)
         except Exception:
             fps = 30
 
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  width)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_FPS, fps)
 
-        actual_w  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or width
-        actual_h  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or height
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or width
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or height
         actual_fps = cap.get(cv2.CAP_PROP_FPS) or fps
         if actual_fps <= 1:
             actual_fps = fps
@@ -322,7 +326,7 @@ class RecordView(ttk.Frame):
         self._set_preview_aspect(actual_w, actual_h)
 
         ext = os.path.splitext(outfile)[1].lower()
-        fourcc = cv2.VideoWriter_fourcc(*("XVID" if ext==".avi" else "mp4v"))
+        fourcc = cv2.VideoWriter_fourcc(*("XVID" if ext == ".avi" else "mp4v"))
         writer = cv2.VideoWriter(outfile, fourcc, float(actual_fps), (actual_w, actual_h))
         if not writer.isOpened():
             cap.release()
@@ -349,7 +353,8 @@ class RecordView(ttk.Frame):
             while not self._stop_evt.is_set():
                 ok, frame = self._cap.read()
                 if not ok:
-                    time.sleep(0.01); continue
+                    time.sleep(0.01)
+                    continue
                 # Save latest frame for preview
                 with self._frame_lock:
                     self._last_bgr = frame.copy()
@@ -357,14 +362,16 @@ class RecordView(ttk.Frame):
                 self._writer.write(frame)
                 self._frame_count += 1
         except Exception as e:
-            self.after(0, lambda: self.status.set(f"Status: error: {e}"))
+            self.after(0, lambda e=e: self.status.set(f"Status: error: {e}"))
         finally:
             try:
-                if self._writer: self._writer.release()
+                if self._writer:
+                    self._writer.release()
             finally:
                 self._writer = None
             try:
-                if self._cap: self._cap.release()
+                if self._cap:
+                    self._cap.release()
             finally:
                 self._cap = None
 
@@ -401,7 +408,7 @@ class RecordView(ttk.Frame):
             rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
             # Hand off to Tk via Pillow
-            pil_img = Image.fromarray(rgb)               # mode "RGB"
+            pil_img = Image.fromarray(rgb)  # mode "RGB"
             img = ImageTk.PhotoImage(image=pil_img)
             self._preview_label.config(image=img, width=self.preview_w, height=self.preview_h)
             self._preview_label.image = img  # keep a reference
@@ -409,7 +416,6 @@ class RecordView(ttk.Frame):
         # Update counter and schedule next tick
         self.frames.set(f"Frames: {self._frame_count}")
         self.after(33, self._preview_tick)  # ~30 FPS UI update
-
 
     def _set_preview_aspect(self, w, h):
         # set preview box size to a nice fit (max width 360, keep aspect)

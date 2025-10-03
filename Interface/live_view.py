@@ -1,6 +1,6 @@
 # live_view.py
 #
-# Live display view (no streaming).
+# Live display view.
 # - Camera selection by index (MSMF/DSHOW/ANY) or by name (DSHOW via ffmpeg listing)
 # - Stable, LARGE in-app preview on the right (fixed-size container; UI doesn't jump)
 # - Fullscreen output window to show your warped result (placeholder provided)
@@ -24,6 +24,7 @@ PREVIEW_H = 450
 FRAME_SIZE = 400
 CANVAS_SIZE = 800
 
+
 # ---------- Warp Helpers ----------
 def enhance_saturation_contrast(image_bgr, saturation_scale=1.3, contrast_alpha=1.2, brightness_beta=10):
     # BGR → HSV (float), boost S, back to BGR, then contrast/brightness
@@ -34,34 +35,72 @@ def enhance_saturation_contrast(image_bgr, saturation_scale=1.3, contrast_alpha=
     return enhanced
 
 
-def build_cone_maps(frame_size: int, canvas_size: int):
-    """Precompute map_x, map_y for a circular cone warp like your prototype."""
-    map_x = np.zeros((canvas_size, canvas_size), dtype=np.float32)
-    map_y = np.zeros((canvas_size, canvas_size), dtype=np.float32)
+def build_cone_maps(
+    frame_size: int,
+    canvas_size: int,
+    span_deg: int = 170,
+    rotate_deg: float = 0.0,
+    r_inner_frac: float = 0.10,
+    r_outer_frac: float = 0.99,
+    center_frac=(0.50, 0.50),  # <<< NEW: move center of cone
+    radius_frac: float = 1.00,
+):  # <<< NEW: scale radius a bit
+    """
+    Warp for Pepper's Cone showing ONE image on the front arc, mapped only to a radial band.
 
-    cx = cy = canvas_size // 2
-    max_r = canvas_size // 2
+    center_frac: (cx, cy) as fractions of canvas_size (0..1). (0.5,0.5) = dead center.
+    radius_frac: multiply the default radius (canvas_size/2) by this (e.g., 0.95..1.05).
+
+    Returns map_x, map_y (float32) with -1 for out-of-bounds.
+    """
+    import math
+    import numpy as np
+
+    map_x = np.full((canvas_size, canvas_size), -1, dtype=np.float32)
+    map_y = np.full((canvas_size, canvas_size), -1, dtype=np.float32)
+
+    cx = int(center_frac[0] * canvas_size)
+    cy = int(center_frac[1] * canvas_size)
+
+    R = int((canvas_size * 0.5) * max(0.10, min(2.0, radius_frac)))  # clamp a bit
+
+    # clamp radii to sane range relative to R
+    r_in_frac = max(0.0, min(0.99, r_inner_frac))
+    r_out_frac = max(r_in_frac + 1.0 / max(1, R), min(1.0, r_outer_frac))
+    r_in = r_in_frac * R
+    r_out = r_out_frac * R
+
+    half = math.radians(max(1, min(359, span_deg))) * 0.5
+    rot = math.radians(rotate_deg)
+
+    angle_to_u = 1.0 / (2 * half)  # [-half, +half] -> [0,1]
+    r_to_v = 1.0 / max(1.0, (r_out - r_in))  # [r_in, r_out]  -> [0,1]
 
     for y in range(canvas_size):
         dy = y - cy
         for x in range(canvas_size):
             dx = x - cx
-            r = np.hypot(dx, dy)
-            if r > max_r:
+            r = (dx * dx + dy * dy) ** 0.5
+            if r < r_in or r > r_out:
                 continue
-            angle = np.arctan2(dy, dx)  # -pi..pi
-            if -np.pi / 2 <= angle <= np.pi / 2:
-                # angle → [0..1], radius (flipped) → [0..1]
-                norm_angle = (angle + (np.pi / 2)) / np.pi
-                norm_radius = 1.0 - (r / max_r)
 
-                sx = int(np.clip(norm_angle * frame_size, 0, frame_size - 1))
-                sy = int(np.clip(norm_radius * frame_size, 0, frame_size - 1))
-                map_x[y, x] = sx
-                map_y[y, x] = sy
-            else:
-                map_x[y, x] = 0
-                map_y[y, x] = 0
+            ang = math.atan2(dy, dx) - rot
+            if ang < -math.pi:
+                ang += 2 * math.pi
+            elif ang > math.pi:
+                ang -= 2 * math.pi
+
+            if -half <= ang <= +half:
+                u = (ang + half) * angle_to_u
+                v = 1.0 - ((r - r_in) * r_to_v)
+
+                # clamp to [0,1]
+                if 0.0 <= u <= 1.0 and 0.0 <= v <= 1.0:
+                    sx = int(u * (frame_size - 1))
+                    sy = int(v * (frame_size - 1))
+                    map_x[y, x] = sx
+                    map_y[y, x] = sy
+
     return map_x, map_y
 
 
@@ -119,7 +158,7 @@ def _list_dshow_devices_via_ffmpeg():
                 seen.add(x)
                 out.append(x)
         return out
-    
+
     return dedup(video), dedup(audio)
 
 
@@ -233,11 +272,20 @@ class LiveView(ttk.Frame):
         self._fs_label = None
         self._fs_img = None
         self._fs_running = False
-        
-        # Precompute warp maps (once)
-        self._map_x, self._map_y = build_cone_maps(FRAME_SIZE, CANVAS_SIZE)
-        self._segmentor = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
 
+        # Precompute warp maps (once)
+        self._map_x, self._map_y = build_cone_maps(
+            frame_size=FRAME_SIZE,
+            canvas_size=CANVAS_SIZE,
+            span_deg=270,  # adjust width
+            rotate_deg=270,  # adjust rotation
+            r_inner_frac=0.06,  # adjust band
+            r_outer_frac=0.98,
+            center_frac=(0.5, 0.55),  # move center (right/left, up/down)
+            radius_frac=1.00,
+        )
+
+        self._segmentor = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
 
         # init
         self._update_controls()
@@ -459,7 +507,6 @@ class LiveView(ttk.Frame):
         # Aim ~60 Hz for smoother motion; adjust as needed
         self.after(16, self._fullscreen_tick)
 
-    
     # ---------- Warp Display ----------
     def _apply_warp(self, frame_bgr):
         """
@@ -479,7 +526,7 @@ class LiveView(ttk.Frame):
             rgb = cv2.cvtColor(sq, cv2.COLOR_BGR2RGB)
             try:
                 seg = self._segmentor.process(rgb)
-                mask = (seg.segmentation_mask > 0.5)
+                mask = seg.segmentation_mask > 0.5
                 fg = np.zeros_like(sq)
                 fg[mask] = sq[mask]
             except Exception:
@@ -493,19 +540,12 @@ class LiveView(ttk.Frame):
         padded = np.zeros_like(fg)
         y_off = (FRAME_SIZE - scaled.shape[0]) // 2
         x_off = (FRAME_SIZE - scaled.shape[1]) // 2
-        padded[y_off:y_off + scaled.shape[0], x_off:x_off + scaled.shape[1]] = scaled
+        padded[y_off : y_off + scaled.shape[0], x_off : x_off + scaled.shape[1]] = scaled
 
         # 4) cone warp
-        warped = cv2.remap(
-            padded, self._map_x, self._map_y,
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0)
-        )
+        warped = cv2.remap(padded, self._map_x, self._map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
 
         # 5) color pop
-        enhanced = enhance_saturation_contrast(
-            warped, saturation_scale=1.4, contrast_alpha=1.8, brightness_beta=-25
-        )
+        enhanced = enhance_saturation_contrast(warped, saturation_scale=1.4, contrast_alpha=1.8, brightness_beta=-25)
 
         return enhanced
-

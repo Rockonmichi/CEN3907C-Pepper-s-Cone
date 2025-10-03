@@ -47,59 +47,62 @@ def build_cone_maps(
 ):  # <<< NEW: scale radius a bit
     """
     Warp for Pepper's Cone showing ONE image on the front arc, mapped only to a radial band.
-
-    center_frac: (cx, cy) as fractions of canvas_size (0..1). (0.5,0.5) = dead center.
-    radius_frac: multiply the default radius (canvas_size/2) by this (e.g., 0.95..1.05).
-
     Returns map_x, map_y (float32) with -1 for out-of-bounds.
     """
-    import math
-    import numpy as np
 
+    # Initialize output arrays
     map_x = np.full((canvas_size, canvas_size), -1, dtype=np.float32)
     map_y = np.full((canvas_size, canvas_size), -1, dtype=np.float32)
 
+    # Center and radius
     cx = int(center_frac[0] * canvas_size)
     cy = int(center_frac[1] * canvas_size)
+    R = int((canvas_size * 0.5) * max(0.10, min(2.0, radius_frac)))
 
-    R = int((canvas_size * 0.5) * max(0.10, min(2.0, radius_frac)))  # clamp a bit
-
-    # clamp radii to sane range relative to R
+    # Clamp radii
     r_in_frac = max(0.0, min(0.99, r_inner_frac))
     r_out_frac = max(r_in_frac + 1.0 / max(1, R), min(1.0, r_outer_frac))
     r_in = r_in_frac * R
     r_out = r_out_frac * R
 
+    # Angle setup
     half = math.radians(max(1, min(359, span_deg))) * 0.5
     rot = math.radians(rotate_deg)
 
-    angle_to_u = 1.0 / (2 * half)  # [-half, +half] -> [0,1]
-    r_to_v = 1.0 / max(1.0, (r_out - r_in))  # [r_in, r_out]  -> [0,1]
+    # Create coordinate grids
+    y_coords, x_coords = np.ogrid[0:canvas_size, 0:canvas_size]
+    dx = x_coords - cx
+    dy = y_coords - cy
 
-    for y in range(canvas_size):
-        dy = y - cy
-        for x in range(canvas_size):
-            dx = x - cx
-            r = (dx * dx + dy * dy) ** 0.5
-            if r < r_in or r > r_out:
-                continue
+    # Calculate radius and angle for all pixels at once
+    r = np.sqrt(dx**2 + dy**2)
+    ang = np.arctan2(dy, dx) - rot
 
-            ang = math.atan2(dy, dx) - rot
-            if ang < -math.pi:
-                ang += 2 * math.pi
-            elif ang > math.pi:
-                ang -= 2 * math.pi
+    # Wrap angles to [-pi, pi]
+    ang = np.where(ang < -np.pi, ang + 2 * np.pi, ang)
+    ang = np.where(ang > np.pi, ang - 2 * np.pi, ang)
 
-            if -half <= ang <= +half:
-                u = (ang + half) * angle_to_u
-                v = 1.0 - ((r - r_in) * r_to_v)
+    # Create mask for valid pixels (inside the band and angle range)
+    valid_mask = (r >= r_in) & (r <= r_out) & (ang >= -half) & (ang <= half)
 
-                # clamp to [0,1]
-                if 0.0 <= u <= 1.0 and 0.0 <= v <= 1.0:
-                    sx = int(u * (frame_size - 1))
-                    sy = int(v * (frame_size - 1))
-                    map_x[y, x] = sx
-                    map_y[y, x] = sy
+    # Calculate UV coordinates only for valid pixels
+    if np.any(valid_mask):
+        angle_to_u = 1.0 / (2 * half)
+        r_to_v = 1.0 / max(1.0, (r_out - r_in))
+
+        u = (ang[valid_mask] + half) * angle_to_u
+        v = 1.0 - ((r[valid_mask] - r_in) * r_to_v)
+
+        # Clamp to [0, 1] and convert to pixel coordinates
+        u = np.clip(u, 0.0, 1.0)
+        v = np.clip(v, 0.0, 1.0)
+
+        sx = (u * (frame_size - 1)).astype(np.float32)
+        sy = (v * (frame_size - 1)).astype(np.float32)
+
+        # Assign to output maps
+        map_x[valid_mask] = sx
+        map_y[valid_mask] = sy
 
     return map_x, map_y
 

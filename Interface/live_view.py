@@ -13,6 +13,7 @@ from tkinter import ttk, messagebox
 
 import numpy as np
 import mediapipe as mp
+import math
 
 import cv2
 from PIL import Image, ImageTk
@@ -105,7 +106,6 @@ def build_cone_maps(
         map_y[valid_mask] = sy
 
     return map_x, map_y
-
 
 # ---------- Backends ----------
 BACKENDS = [
@@ -232,7 +232,68 @@ class LiveView(ttk.Frame):
         self.fps_entry = ttk.Entry(settings, width=6)
         self.fps_entry.insert(0, "30")
         self.fps_entry.grid(row=0, column=3, sticky="w")
+        
+        # --- Cone Warp Tuning (add after Video Settings section) ---
+        tuning = ttk.LabelFrame(left, text="Cone Warp Tuning")
+        tuning.pack(fill="x", padx=4, pady=(0, 10))
 
+        # Center X/Y
+        ttk.Label(tuning, text="Center X:").grid(row=0, column=0, padx=(8,4), pady=4, sticky="w")
+        self.center_x_var = tk.DoubleVar(value=0.50)
+        self.center_x_slider = ttk.Scale(tuning, from_=0.0, to=1.0, orient="horizontal", 
+                                        variable=self.center_x_var, command=self._on_warp_change)
+        self.center_x_slider.grid(row=0, column=1, sticky="ew", padx=4)
+        self.center_x_label = ttk.Label(tuning, text="0.50")
+        self.center_x_label.grid(row=0, column=2, padx=4)
+
+        ttk.Label(tuning, text="Center Y:").grid(row=1, column=0, padx=(8,4), pady=4, sticky="w")
+        self.center_y_var = tk.DoubleVar(value=0.50)
+        self.center_y_slider = ttk.Scale(tuning, from_=0.0, to=1.0, orient="horizontal",
+                                        variable=self.center_y_var, command=self._on_warp_change)
+        self.center_y_slider.grid(row=1, column=1, sticky="ew", padx=4)
+        self.center_y_label = ttk.Label(tuning, text="0.50")
+        self.center_y_label.grid(row=1, column=2, padx=4)
+
+        # Inner/Outer radius
+        ttk.Label(tuning, text="Inner Radius:").grid(row=2, column=0, padx=(8,4), pady=4, sticky="w")
+        self.r_inner_var = tk.DoubleVar(value=0.08)
+        self.r_inner_slider = ttk.Scale(tuning, from_=0.0, to=0.95, orient="horizontal",
+                                        variable=self.r_inner_var, command=self._on_warp_change)
+        self.r_inner_slider.grid(row=2, column=1, sticky="ew", padx=4)
+        self.r_inner_label = ttk.Label(tuning, text="0.08")
+        self.r_inner_label.grid(row=2, column=2, padx=4)
+
+        ttk.Label(tuning, text="Outer Radius:").grid(row=3, column=0, padx=(8,4), pady=4, sticky="w")
+        self.r_outer_var = tk.DoubleVar(value=0.995)
+        self.r_outer_slider = ttk.Scale(tuning, from_=0.5, to=1.0, orient="horizontal",
+                                        variable=self.r_outer_var, command=self._on_warp_change)
+        self.r_outer_slider.grid(row=3, column=1, sticky="ew", padx=4)
+        self.r_outer_label = ttk.Label(tuning, text="0.995")
+        self.r_outer_label.grid(row=3, column=2, padx=4)
+
+        # Span and Rotation
+        ttk.Label(tuning, text="Span (deg):").grid(row=4, column=0, padx=(8,4), pady=4, sticky="w")
+        self.span_var = tk.DoubleVar(value=200)
+        self.span_slider = ttk.Scale(tuning, from_=90, to=360, orient="horizontal",
+                                    variable=self.span_var, command=self._on_warp_change)
+        self.span_slider.grid(row=4, column=1, sticky="ew", padx=4)
+        self.span_label = ttk.Label(tuning, text="200")
+        self.span_label.grid(row=4, column=2, padx=4)
+
+        ttk.Label(tuning, text="Rotation (deg):").grid(row=5, column=0, padx=(8,4), pady=4, sticky="w")
+        self.rotate_var = tk.DoubleVar(value=270)
+        self.rotate_slider = ttk.Scale(tuning, from_=0, to=360, orient="horizontal",
+                                        variable=self.rotate_var, command=self._on_warp_change)
+        self.rotate_slider.grid(row=5, column=1, sticky="ew", padx=4)
+        self.rotate_label = ttk.Label(tuning, text="270")
+        self.rotate_label.grid(row=5, column=2, padx=4)
+
+        tuning.grid_columnconfigure(1, weight=1)
+
+        # Reset button
+        ttk.Button(tuning, text="Reset to Defaults", command=self._reset_warp_params).grid(
+            row=6, column=0, columnspan=3, pady=8)
+        
         # --- Actions ---
         actions = ttk.Frame(left)
         actions.pack(pady=(6, 2))
@@ -552,3 +613,40 @@ class LiveView(ttk.Frame):
         enhanced = enhance_saturation_contrast(warped, saturation_scale=1.4, contrast_alpha=1.8, brightness_beta=-25)
 
         return enhanced
+    
+    def _on_warp_change(self, _=None):
+        """Rebuild warp maps when any slider changes."""
+        # Update labels
+        self.center_x_label.config(text=f"{self.center_x_var.get():.2f}")
+        self.center_y_label.config(text=f"{self.center_y_var.get():.2f}")
+        self.r_inner_label.config(text=f"{self.r_inner_var.get():.3f}")
+        self.r_outer_label.config(text=f"{self.r_outer_var.get():.3f}")
+        self.span_label.config(text=f"{int(self.span_var.get())}")
+        self.rotate_label.config(text=f"{int(self.rotate_var.get())}")
+        
+        # Rebuild maps
+        self._rebuild_warp_maps()
+
+    def _rebuild_warp_maps(self):
+        """Regenerate warp maps with current slider values."""
+        self._map_x, self._map_y = build_cone_maps(
+            frame_size=FRAME_SIZE,
+            canvas_size=CANVAS_SIZE,
+            span_deg=int(self.span_var.get()),
+            rotate_deg=self.rotate_var.get(),
+            r_inner_frac=self.r_inner_var.get(),
+            r_outer_frac=self.r_outer_var.get(),
+            center_frac=(self.center_x_var.get(), self.center_y_var.get()),
+            radius_frac=1.00,
+        )
+
+    def _reset_warp_params(self):
+        """Reset all sliders to default values."""
+        self.center_x_var.set(0.50)
+        self.center_y_var.set(0.50)
+        self.r_inner_var.set(0.08)
+        self.r_outer_var.set(0.995)
+        self.span_var.set(200)
+        self.rotate_var.set(270)
+        self._on_warp_change()
+

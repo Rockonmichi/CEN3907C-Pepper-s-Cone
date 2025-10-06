@@ -1,430 +1,447 @@
-# record_view.py (with live preview)
-import base64
+# record_view.py
 import os
 import time
 import threading
-import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk
-
 
 import cv2
-
-# ---------- Backends ----------
-BACKENDS = [
-    ("MSMF (Windows 10/11)", cv2.CAP_MSMF),
-    ("DSHOW (DirectShow)", cv2.CAP_DSHOW),
-    ("ANY (let OpenCV pick)", cv2.CAP_ANY),
-]
-
-
-def _open_by_index(index: int, api_pref: int):
-    cap = cv2.VideoCapture(index, api_pref)
-    if cap.isOpened():
-        return cap, "index", api_pref
-    cap.release()
-    return None, None, None
-
-
-def _open_by_name_dshow(name: str):
-    src = f"video={name}"
-    cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
-    if cap.isOpened():
-        return cap, "name", cv2.CAP_DSHOW
-    cap.release()
-    return None, None, None
-
-
-def _enumerate_indices(max_probe=6):
-    found = []
-    for i in range(max_probe):
-        for label, api in BACKENDS:
-            cap = cv2.VideoCapture(i, api)
-            if cap.isOpened():
-                found.append((i, label))
-                cap.release()
-                break
-    return found
-
-
-def _list_dshow_devices_via_ffmpeg():
-    try:
-        proc = subprocess.Popen(["ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        out, _ = proc.communicate(timeout=6)
-    except Exception:
-        return [], []
-
-    video, audio = [], []
-    current = None
-    for line in out.splitlines():
-        line = line.strip()
-        if "DirectShow video devices" in line:
-            current = "video"
-            continue
-        if "DirectShow audio devices" in line:
-            current = "audio"
-            continue
-        if line.startswith('"') and line.endswith('"'):
-            name = line.strip('"')
-            if current == "video":
-                video.append(name)
-            elif current == "audio":
-                audio.append(name)
-    return video, audio
+import numpy as np
+from PIL import Image, ImageTk
 
 
 class RecordView(ttk.Frame):
     """
-    Functional recorder with preview.
-    - Open by index (MSMF/DSHOW/ANY) or by name (DSHOW).
-    - Records to MP4 (video only) via OpenCV VideoWriter.
-    - Shows a live preview while recording (no Pillow required).
+    Record camera video with a live preview. Instead of pre-processing after stop,
+    the cone warp is applied ON DEMAND when you open the Cone Screen—mirroring
+    the live pipeline. Optionally save a warped copy while it plays.
     """
 
-    def __init__(self, parent, controller):
+    def __init__(self, parent, controller=None):
         super().__init__(parent)
         self.controller = controller
 
-        # ----- Title -----
-        title = ttk.Label(self, text="Record Video", style="Header.TLabel")
-        subtitle = ttk.Label(self, text="Pick camera (by index or name), choose settings, set output, then record.", style="Body.TLabel")
-        title.pack(pady=(10, 4))
-        subtitle.pack(pady=(0, 10))
+        # --- state ---
+        self.cap = None
+        self.writer = None
+        self.record_thread = None
+        self.recording = False
+        self.last_frame = None
+        self.out_path = None
+        self._frame_count = 0
 
-        # We’ll put controls on the left, preview on the right
-        top = ttk.Frame(self)
-        top.pack(fill="both", expand=True)
-        left = ttk.Frame(top)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        right = ttk.Frame(top)
-        right.pack(side="right", fill="both", padx=(8, 0))
+        # --------------------------
+        # UI LAYOUT
+        # --------------------------
+        root = ttk.Frame(self)
+        root.pack(fill="both", expand=True)
 
-        # ----- Camera selection (left) -----
-        cam_mode = ttk.LabelFrame(left, text="Camera Selection")
-        cam_mode.pack(fill="x", padx=4, pady=(0, 10))
+        left = ttk.Frame(root)
+        left.pack(side="left", fill="y", padx=12, pady=12)
 
-        self.sel_mode = tk.StringVar(value="index")
-        r1 = ttk.Radiobutton(cam_mode, text="By Index", variable=self.sel_mode, value="index", command=self._update_controls)
-        r2 = ttk.Radiobutton(cam_mode, text="By Name (DSHOW)", variable=self.sel_mode, value="name", command=self._update_controls)
+        right = ttk.Frame(root)
+        right.pack(side="left", fill="both", expand=True, padx=(0, 12), pady=12)
 
-        idx_row = ttk.Frame(cam_mode)
-        ttk.Label(idx_row, text="Index:").grid(row=0, column=0, padx=(0, 6))
-        self.idx_combo = ttk.Combobox(idx_row, state="readonly", width=20, values=["(scan...)"])
-        self.idx_combo.set("(scan...)")
-        self.btn_scan_idx = ttk.Button(idx_row, text="Scan Indices", command=self.scan_indices)
+        # Top row: back + title
+        title_row = ttk.Frame(left)
+        title_row.pack(fill="x")
+        ttk.Button(title_row, text="← Back", command=self._go_back).pack(side="left")
+        ttk.Label(title_row, text="Record", style="Header.TLabel").pack(side="left", padx=8)
 
-        ttk.Label(idx_row, text="Backend:").grid(row=0, column=3, padx=(12, 6))
-        self.backend_combo = ttk.Combobox(idx_row, state="readonly", values=[label for (label, _) in BACKENDS], width=22)
-        self.backend_combo.set(BACKENDS[0][0])
+        ttk.Label(
+            left,
+            text=("Choose a camera, set resolution/fps, and record. "
+                  "When you’re ready, click 'Open Cone Screen (process now)' to play the recorded "
+                  "video through the same cone-warp pipeline used in Live. "
+                  "Optionally save the warped copy while it plays."),
+            style="Body.TLabel", wraplength=360
+        ).pack(anchor="w", pady=(8, 12))
 
-        name_row = ttk.Frame(cam_mode)
-        ttk.Label(name_row, text="Device Name:").grid(row=0, column=0, padx=(0, 6))
-        self.name_entry = ttk.Entry(name_row, width=36)
-        self.btn_list_names = ttk.Button(name_row, text="List Cameras (ffmpeg)", command=self.list_names_ffmpeg)
-        self.names_combo = ttk.Combobox(name_row, state="readonly", width=36, values=[])
-        self.btn_use_selected = ttk.Button(name_row, text="Use Selected", command=self.use_selected_name)
+        # Camera box
+        cam_box = ttk.LabelFrame(left, text="Camera")
+        cam_box.pack(fill="x", pady=(0, 8))
 
-        r1.pack(anchor="w", padx=8, pady=(6, 2))
-        idx_row.pack(fill="x", padx=16, pady=(0, 6))
-        self.idx_combo.grid(row=0, column=1)
-        self.btn_scan_idx.grid(row=0, column=2, padx=6)
-        self.backend_combo.grid(row=0, column=4, padx=(0, 6))
+        self.cam_index = tk.IntVar(value=0)
+        row = ttk.Frame(cam_box); row.pack(fill="x", padx=6, pady=6)
+        ttk.Label(row, text="Index:").pack(side="left")
+        self.cam_entry = ttk.Spinbox(row, from_=0, to=10, width=5, textvariable=self.cam_index)
+        self.cam_entry.pack(side="left", padx=6)
+        ttk.Button(row, text="Open", command=self._open_camera).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="Close", command=self._close_camera).pack(side="left", padx=6)
 
-        r2.pack(anchor="w", padx=8, pady=(8, 2))
-        name_row.pack(fill="x", padx=16, pady=(0, 6))
-        self.name_entry.grid(row=0, column=1)
-        self.btn_list_names.grid(row=0, column=2, padx=6)
-        self.names_combo.grid(row=1, column=1, pady=(6, 0), sticky="w")
-        self.btn_use_selected.grid(row=1, column=2, padx=6, pady=(6, 0))
+        # Video settings
+        video_box = ttk.LabelFrame(left, text="Video Settings")
+        video_box.pack(fill="x", pady=(0, 8))
+        self.width = tk.IntVar(value=1280)
+        self.height = tk.IntVar(value=720)
+        self.fps = tk.DoubleVar(value=30.0)
 
-        # ----- Settings (left) -----
-        settings = ttk.LabelFrame(left, text="Settings")
-        settings.pack(fill="x", padx=4, pady=(0, 10))
+        r1 = ttk.Frame(video_box); r1.pack(fill="x", padx=6, pady=(6, 0))
+        ttk.Label(r1, text="Resolution:").pack(side="left")
+        ttk.Entry(r1, width=6, textvariable=self.width).pack(side="left", padx=4)
+        ttk.Label(r1, text="x").pack(side="left")
+        ttk.Entry(r1, width=6, textvariable=self.height).pack(side="left", padx=4)
 
-        ttk.Label(settings, text="Resolution:").grid(row=0, column=0, padx=(8, 6), pady=8, sticky="w")
-        self.res_combo = ttk.Combobox(settings, state="readonly", width=12, values=["1280x720", "1920x1080", "640x480"])
-        self.res_combo.set("1280x720")
-        self.res_combo.grid(row=0, column=1, sticky="w")
+        r2 = ttk.Frame(video_box); r2.pack(fill="x", padx=6, pady=6)
+        ttk.Label(r2, text="FPS:").pack(side="left")
+        ttk.Entry(r2, width=6, textvariable=self.fps).pack(side="left", padx=4)
 
-        ttk.Label(settings, text="FPS:").grid(row=0, column=2, padx=(16, 6), pady=8, sticky="w")
-        self.fps_entry = ttk.Entry(settings, width=6)
-        self.fps_entry.insert(0, "30")
-        self.fps_entry.grid(row=0, column=3, sticky="w")
+        # Output
+        out_box = ttk.LabelFrame(left, text="Output")
+        out_box.pack(fill="x", pady=(0, 8))
+        self.out_var = tk.StringVar(value="")
+        r3 = ttk.Frame(out_box); r3.pack(fill="x", padx=6, pady=6)
+        ttk.Entry(r3, textvariable=self.out_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(r3, text="Browse…", command=self._choose_output).pack(side="left", padx=6)
 
-        # ----- Output (left) -----
-        out_row = ttk.Frame(left)
-        out_row.pack(fill="x", padx=4, pady=(0, 10))
-        self.out_path = tk.StringVar(value="No file selected.")
-        out_btn = ttk.Button(out_row, text="Choose Output (.mp4)", command=self.choose_output)
-        out_lbl = ttk.Label(out_row, textvariable=self.out_path, width=48)
-        out_btn.grid(row=0, column=0, padx=(0, 8))
-        out_lbl.grid(row=0, column=1, sticky="w")
+        # Process mode
+        proc_box = ttk.LabelFrame(left, text="Cone Screen Options")
+        proc_box.pack(fill="x", pady=(0, 8))
+        self.save_while_play_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            proc_box,
+            text="Also save warped copy while playing",
+            variable=self.save_while_play_var
+        ).pack(side="left", padx=6, pady=6)
 
-        # ----- Controls (left) -----
-        ctrl = ttk.Frame(left)
-        ctrl.pack(pady=(4, 8))
-        self.btn_start = ttk.Button(ctrl, text="Start Recording", command=self.start_record, state="disabled")
-        self.btn_stop = ttk.Button(ctrl, text="Stop Recording", command=self.stop_record, state="disabled")
-        back_btn = ttk.Button(ctrl, text="← Back", command=lambda: self.controller.show_page("HomePage"))
-        self.btn_start.grid(row=0, column=0, padx=6)
-        self.btn_stop.grid(row=0, column=1, padx=6)
-        back_btn.grid(row=0, column=2, padx=6)
+        # Start/Stop
+        actions = ttk.Frame(left)
+        actions.pack(fill="x", pady=(4, 0))
+        ttk.Button(actions, text="Start Recording", command=self._start_recording).pack(side="left")
+        ttk.Button(actions, text="Stop", command=self._stop_recording).pack(side="left", padx=8)
 
-        # ----- Status (left) -----
-        status_row = ttk.Frame(left)
-        status_row.pack()
-        self.status = tk.StringVar(value="Status: idle")
+        # Open cone screen (process on demand)
+        open_row = ttk.Frame(left)
+        open_row.pack(fill="x", pady=(8, 0))
+        ttk.Button(
+            open_row,
+            text="Open Cone Screen (process now)",
+            command=self._open_cone_screen_process_now
+        ).pack(side="left")
+
+        # Right preview
+        ttk.Label(right, text="Live Preview", style="Header.TLabel").pack(anchor="w")
+        self.preview_label = ttk.Label(right)
+        self.preview_label.pack(fill="both", expand=True, pady=(6, 0))
+
+        # stats
         self.frames = tk.StringVar(value="Frames: 0")
-        ttk.Label(status_row, textvariable=self.status).grid(row=0, column=0, padx=(0, 12))
-        ttk.Label(status_row, textvariable=self.frames).grid(row=0, column=1)
+        ttk.Label(right, textvariable=self.frames).pack(anchor="w", pady=6)
 
-        # ----- Preview (right) -----
-        ttk.Label(right, text="Preview", style="Body.TLabel").pack()
-        self.preview_w = 320
-        self.preview_h = 180  # 16:9 default; will adapt
-        self._preview_label = tk.Label(right, bg="#000", width=self.preview_w, height=self.preview_h)
-        self._preview_label.pack(padx=4, pady=4)
-        self._preview_img = None  # keep reference to avoid GC
-        self._last_bgr = None  # latest frame (BGR) from record loop
-        self._frame_lock = threading.Lock()
+        # begin preview loop
+        self.after(100, self._preview_tick)
 
-        # runtime vars
-        self._cap = None
-        self._writer = None
-        self._stop_evt = threading.Event()
-        self._rec_thread = None
-        self._frame_count = 0
-
-        # initial scan + UI init
-        self.scan_indices()
-        self._update_controls()
-        self._update_start_enabled()
-        self.after(100, self._preview_tick)  # start preview timer (polls self._last_bgr)
-
-    # ---------- UI Helpers ----------
-    def _update_controls(self):
-        mode = self.sel_mode.get()
-        state_idx = "normal" if mode == "index" else "disabled"
-        state_name = "normal" if mode == "name" else "disabled"
-        for w in (self.idx_combo, self.btn_scan_idx, self.backend_combo):
-            w.config(state=state_idx)
-        for w in (self.name_entry, self.btn_list_names, self.names_combo, self.btn_use_selected):
-            w.config(state=state_name)
-        self._update_start_enabled()
-
-    def _update_start_enabled(self):
-        has_output = self.out_path.get() != "No file selected."
-        has_camera = False
-        if self.sel_mode.get() == "index":
-            has_camera = self.idx_combo.get() and "(no indices)" not in self.idx_combo.get()
-        else:
-            has_camera = len(self.name_entry.get().strip()) > 0
-        self.btn_start.config(state="normal" if (has_output and has_camera) else "disabled")
-
-    def scan_indices(self):
-        self.idx_combo["values"] = ["(scanning...)"]
-        self.idx_combo.set("(scanning...)")
-        self.status.set("Status: scanning indices...")
-
-        def _scan():
-            found = _enumerate_indices(8)
-            vals = [f"{i} ({backend})" for i, backend in found] or ["(no indices)"]
-            self.after(0, lambda: self._apply_idx_scan(vals))
-
-        threading.Thread(target=_scan, daemon=True).start()
-
-    def _apply_idx_scan(self, values):
-        self.idx_combo["values"] = values
-        self.idx_combo.set(values[0])
-        self.status.set("Status: idle")
-        self._update_start_enabled()
-
-    def list_names_ffmpeg(self):
-        vids, _ = _list_dshow_devices_via_ffmpeg()
-        if not vids:
-            messagebox.showinfo("ffmpeg", "No video devices found (or ffmpeg not available).")
-            return
-        self.names_combo["values"] = vids
-        if vids:
-            self.names_combo.set(vids[0])
-
-    def use_selected_name(self):
-        name = self.names_combo.get().strip()
-        if name:
-            self.name_entry.delete(0, tk.END)
-            self.name_entry.insert(0, name)
-        self._update_start_enabled()
-
-    def choose_output(self):
-        path = filedialog.asksaveasfilename(title="Save recorded video", defaultextension=".mp4", filetypes=[("MP4 video", "*.mp4"), ("AVI", "*.avi"), ("All files", "*.*")])
-        if path:
-            self.out_path.set(path)
-        self._update_start_enabled()
-
-    # ---------- Recording ----------
-    def start_record(self):
-        if self._rec_thread and self._rec_thread.is_alive():
-            return
-        outfile = self.out_path.get()
-        if not outfile or outfile == "No file selected.":
-            messagebox.showwarning("Output", "Please choose an output file.")
-            return
-
-        # Open capture
-        mode = self.sel_mode.get()
-        if mode == "index":
-            sel = self.idx_combo.get()
-            if "(no indices)" in sel:
-                messagebox.showwarning("Camera", "No working indices found.")
-                return
+    # ---------- navigation ----------
+    def _go_back(self):
+        if self.controller and hasattr(self.controller, "show_page"):
             try:
-                idx = int(sel.split()[0])
+                self.controller.show_page("HomePage")
+                return
             except Exception:
-                idx = 0
-            api_label = self.backend_combo.get()
-            api_pref = dict(BACKENDS)[api_label]
-            cap, _, _ = _open_by_index(idx, api_pref)
-            if not cap:
-                messagebox.showerror("Camera", f"Could not open index {idx} with {api_label}. Try name mode.")
-                return
-            backend_used = api_label
-        else:
-            name = self.name_entry.get().strip()
-            if not name:
-                messagebox.showwarning("Camera", "Enter a device name (or use the list button).")
-                return
-            cap, _, _ = _open_by_name_dshow(name)
-            if not cap:
-                messagebox.showerror("Camera", f"Could not open device by name:\n{name}\n(Ensure it matches the ffmpeg list exactly.)")
-                return
-            backend_used = "DSHOW (name)"
+                pass
+        self.winfo_toplevel().focus_set()
 
-        # Settings
-        try:
-            w_str, h_str = self.res_combo.get().split("x")
-            width, height = int(w_str), int(h_str)
-        except Exception:
-            width, height = 1280, 720
-        try:
-            fps = int(self.fps_entry.get())
-            fps = max(1, fps)
-        except Exception:
-            fps = 30
-
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        cap.set(cv2.CAP_PROP_FPS, fps)
-
-        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or width
-        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or height
-        actual_fps = cap.get(cv2.CAP_PROP_FPS) or fps
-        if actual_fps <= 1:
-            actual_fps = fps
-
-        # Adapt preview aspect to camera
-        self._set_preview_aspect(actual_w, actual_h)
-
-        ext = os.path.splitext(outfile)[1].lower()
-        fourcc = cv2.VideoWriter_fourcc(*("XVID" if ext == ".avi" else "mp4v"))
-        writer = cv2.VideoWriter(outfile, fourcc, float(actual_fps), (actual_w, actual_h))
-        if not writer.isOpened():
-            cap.release()
-            messagebox.showerror("Writer", "Could not open output file. Try a different path/extension.")
+    # ---------- camera & recording ----------
+    def _open_camera(self):
+        self._close_camera()
+        idx = int(self.cam_index.get())
+        self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)  # Windows-friendly
+        if not self.cap or not self.cap.isOpened():
+            messagebox.showerror("Camera", f"Could not open camera index {idx}.")
+            self.cap = None
             return
 
-        # Store handles
-        self._cap = cap
-        self._writer = writer
-        self._frame_count = 0
-        self._stop_evt.clear()
+        if self.width.get() > 0 and self.height.get() > 0:
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.width.get()))
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.height.get()))
+        if self.fps.get() > 0:
+            self.cap.set(cv2.CAP_PROP_FPS, float(self.fps.get()))
 
-        self.status.set(f"Status: recording ({backend_used}, {actual_w}x{actual_h}@{int(actual_fps)}fps)")
-        self.btn_start.config(state="disabled")
-        self.btn_stop.config(state="normal")
-
-        # Launch record thread
-        self._rec_thread = threading.Thread(target=self._record_loop, daemon=True)
-        self._rec_thread.start()
-        # Start UI counters/preview already running via after()
-
-    def _record_loop(self):
+    def _close_camera(self):
         try:
-            while not self._stop_evt.is_set():
-                ok, frame = self._cap.read()
-                if not ok:
-                    time.sleep(0.01)
-                    continue
-                # Save latest frame for preview
-                with self._frame_lock:
-                    self._last_bgr = frame.copy()
-                # Write to file
-                self._writer.write(frame)
-                self._frame_count += 1
-        except Exception as e:
-            self.after(0, lambda e=e: self.status.set(f"Status: error: {e}"))
+            if self.cap:
+                self.cap.release()
         finally:
-            try:
-                if self._writer:
-                    self._writer.release()
-            finally:
-                self._writer = None
-            try:
-                if self._cap:
-                    self._cap.release()
-            finally:
-                self._cap = None
+            self.cap = None
 
-    def stop_record(self):
-        if not self._rec_thread:
+    def _choose_output(self):
+        path = filedialog.asksaveasfilename(
+            title="Save recording as",
+            defaultextension=".mp4",
+            filetypes=[("MP4", "*.mp4"), ("All files", "*.*")]
+        )
+        if path:
+            self.out_var.set(path)
+
+    def _start_recording(self):
+        if self.cap is None or not self.cap.isOpened():
+            self._open_camera()
+            if self.cap is None:
+                return
+
+        out_path = self.out_var.get().strip()
+        if not out_path:
+            messagebox.showwarning("Output", "Please choose an output file first.")
             return
-        self._stop_evt.set()
-        self._rec_thread.join(timeout=2.0)
-        self._rec_thread = None
-        self.btn_stop.config(state="disabled")
-        self.btn_start.config(state="normal")
-        self.status.set("Status: idle")
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
-    # ---------- Preview ----------
+        w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or int(self.width.get())
+        h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or int(self.height.get())
+        fps = self.cap.get(cv2.CAP_PROP_FPS) or float(self.fps.get() or 30.0)
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        self.writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+        if not self.writer or not self.writer.isOpened():
+            messagebox.showerror("Record", "Could not open VideoWriter. Try a different path or filename.")
+            self.writer = None
+            return
+
+        self.out_path = out_path
+        self.recording = True
+        self._frame_count = 0
+
+        self.record_thread = threading.Thread(target=self._record_loop, args=(w, h), daemon=True)
+        self.record_thread.start()
+        messagebox.showinfo("Recording", f"Recording started.\nSaving to: {out_path}")
+
+    def _record_loop(self, w, h):
+        while self.recording and self.cap and self.cap.isOpened():
+            ok, frame = self.cap.read()
+            if not ok:
+                break
+            if frame.shape[1] != w or frame.shape[0] != h:
+                frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+            self.last_frame = frame
+            self.writer.write(frame)
+            self._frame_count += 1
+            time.sleep(0.001)
+
+    def _stop_recording(self):
+        if self.recording:
+            self.recording = False
+            try:
+                if self.record_thread:
+                    self.record_thread.join(timeout=1.0)
+            except Exception:
+                pass
+            try:
+                if self.writer:
+                    self.writer.release()
+            finally:
+                self.writer = None
+
+        self._close_camera()  # turn off LED / free device
+        messagebox.showinfo("Recording", "Recording stopped.")
+
+    # ---------- preview ----------
     def _preview_tick(self):
-        """
-        Pull latest BGR frame, convert to RGB, and display via Pillow (ImageTk).
-        This avoids Tk's PNG decoding quirks and fixes the blue-tint issue.
-        """
-        frame = None
-        with self._frame_lock:
-            if self._last_bgr is not None:
-                frame = self._last_bgr
-
-        if frame is not None:
-            # Fit to preview box while keeping aspect
-            ph, pw = self.preview_h, self.preview_w
-            fh, fw = frame.shape[:2]
-            scale = min(pw / fw, ph / fh)
-            new_w, new_h = max(1, int(fw * scale)), max(1, int(fh * scale))
-            resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-            # Convert BGR -> RGB (critical for correct colors)
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-
-            # Hand off to Tk via Pillow
-            pil_img = Image.fromarray(rgb)  # mode "RGB"
-            img = ImageTk.PhotoImage(image=pil_img)
-            self._preview_label.config(image=img, width=self.preview_w, height=self.preview_h)
-            self._preview_label.image = img  # keep a reference
-
-        # Update counter and schedule next tick
+        if self.cap and self.cap.isOpened():
+            frame = self.last_frame
+            if frame is None:
+                ok, frm = self.cap.read()
+                if ok:
+                    frame = frm
+            if frame is not None:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, _ = rgb.shape
+                lbl_w = max(320, self.preview_label.winfo_width() or w)
+                lbl_h = max(180, self.preview_label.winfo_height() or h)
+                scale = min(lbl_w / w, lbl_h / h)
+                new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                im = Image.fromarray(rgb).resize(new_size, Image.BILINEAR)
+                self._tk_img = ImageTk.PhotoImage(im)
+                self.preview_label.config(image=self._tk_img)
         self.frames.set(f"Frames: {self._frame_count}")
-        self.after(33, self._preview_tick)  # ~30 FPS UI update
+        self.after(33, self._preview_tick)
 
-    def _set_preview_aspect(self, w, h):
-        # set preview box size to a nice fit (max width 360, keep aspect)
-        maxw = 360
-        scale = maxw / float(w)
-        pw = int(w * scale)
-        ph = int(h * scale)
-        # clamp reasonable size
-        pw = max(200, min(360, pw))
-        ph = max(120, min(240, ph))
-        self.preview_w, self.preview_h = pw, ph
-        self._preview_label.config(width=pw, height=ph)
+    # ---------- background removal helpers ----------
+    def _build_segmentor(self):
+        try:
+            import mediapipe as mp
+            return mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+        except Exception:
+            return None
+
+    def _segment_person(self, bgr_square, segmentor):
+        if segmentor is None:
+            return bgr_square
+        rgb = cv2.cvtColor(bgr_square, cv2.COLOR_BGR2RGB)
+        seg = segmentor.process(rgb)
+        raw = seg.segmentation_mask.astype("float32")
+        raw = cv2.GaussianBlur(raw, (7, 7), 0)
+        mask = (raw > 0.35).astype("uint8") * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=1)
+        fg = cv2.bitwise_and(bgr_square, bgr_square, mask=mask)
+        return fg
+
+    # ---------- cone screen: process RECORDED video ON DEMAND ----------
+    def _open_cone_screen_process_now(self):
+        """
+        Open a fullscreen OpenCV window that plays the recorded file through the
+        cone warp pipeline in real time (like Live). Optionally save a warped copy.
+        """
+        # Choose the most recent output path
+        in_path = self.out_path or self.out_var.get().strip()
+        if not in_path or not os.path.exists(in_path):
+            messagebox.showwarning("Cone Screen", "No recorded video found. Please record and stop first.")
+            return
+
+        save_copy = bool(self.save_while_play_var.get())
+        threading.Thread(
+            target=self._cone_player_worker,
+            args=(in_path, save_copy),
+            daemon=True
+        ).start()
+
+    def _cone_player_worker(self, in_path: str, save_copy: bool):
+        # Import helpers from live_view
+        try:
+            from live_view import build_cone_maps, enhance_saturation_contrast, FRAME_SIZE, CANVAS_SIZE
+        except Exception as e:
+            messagebox.showerror("Cone Screen", f"Could not import live_view helpers:\n{e}")
+            return
+
+        # Open video (FFMPEG if possible)
+        try:
+            cap = cv2.VideoCapture(in_path, cv2.CAP_FFMPEG)
+            if not cap or not cap.isOpened():
+                raise RuntimeError("FFMPEG failed")
+        except Exception:
+            cap = cv2.VideoCapture(in_path)
+            if not cap or not cap.isOpened():
+                messagebox.showerror("Cone Screen", f"Could not open video:\n{in_path}")
+                return
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps != fps or fps < 1.0:
+            fps = 30.0
+        delay = max(1, int(1000.0 / float(min(60.0, max(15.0, fps)))))
+
+        # Build warp maps once
+        params = dict(
+            span_deg=200,
+            rotate_deg=270.0,
+            r_inner_frac=0.08,
+            r_outer_frac=0.995,
+            center_frac=(0.50, 0.50),
+            radius_frac=1.00,
+        )
+        try:
+            map_x, map_y = build_cone_maps(
+                frame_size=int(FRAME_SIZE),
+                canvas_size=int(CANVAS_SIZE),
+                **params
+            )
+        except Exception as e:
+            cap.release()
+            messagebox.showerror("Cone Screen", f"Failed to build warp maps:\n{e}")
+            return
+
+        # Optional writer (save warped copy while playing)
+        writer = None
+        out_path = None
+        if save_copy:
+            base, _ = os.path.splitext(in_path)
+            out_path = base + "_cone.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(out_path, fourcc, fps, (int(CANVAS_SIZE), int(CANVAS_SIZE)))
+            if not writer.isOpened():
+                writer = None
+                out_path = None
+
+        # Background remover
+        segmentor = self._build_segmentor()
+
+        # Fullscreen OpenCV window
+        win = "Cone Screen (Processed Live)"
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+        # Play (loop)
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                # loop
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+
+            # 1) square to FRAME_SIZE
+            sq = cv2.resize(frame, (int(FRAME_SIZE), int(FRAME_SIZE)), interpolation=cv2.INTER_AREA)
+
+            # 2) background removal
+            fg = self._segment_person(sq, segmentor)
+
+            # 3) center + scale like Live
+            scale = 0.6
+            scaled = cv2.resize(fg, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            padded = np.zeros_like(fg)
+            y_off = (int(FRAME_SIZE) - scaled.shape[0]) // 2
+            x_off = (int(FRAME_SIZE) - scaled.shape[1]) // 2
+            padded[y_off:y_off + scaled.shape[0], x_off:x_off + scaled.shape[1]] = scaled
+
+            # 4) cone warp
+            warped = cv2.remap(
+                padded, map_x, map_y,
+                interpolation=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(0, 0, 0)
+            )
+
+            # 5) color pop
+            enhanced = enhance_saturation_contrast(
+                warped, saturation_scale=1.4, contrast_alpha=1.8, brightness_beta=-25
+            )
+
+            # show
+            cv2.imshow(win, enhanced)
+
+            # optionally save
+            if writer is not None:
+                writer.write(enhanced)
+
+            key = cv2.waitKey(delay) & 0xFF
+            if key in (27, ord('q')):  # Esc or q to quit
+                break
+
+        cap.release()
+        if writer is not None:
+            writer.release()
+        cv2.destroyWindow(win)
+
+        # Notify if we saved
+        if save_copy and out_path:
+            self.after(0, lambda: messagebox.showinfo("Cone Screen", f"Warped copy saved:\n{out_path}"))
+
+    # ---------- progress helpers (unused in this on-demand flow; kept for parity) ----------
+    def _open_progress(self, out_path: str, total: int):
+        try:
+            self._progress = tk.Toplevel(self)
+            self._progress.title("Warping video…")
+            self._progress.resizable(False, False)
+            ttk.Label(self._progress, text=f"Warping to {os.path.basename(out_path)}").pack(padx=12, pady=(12, 6))
+            self._pbar = ttk.Progressbar(self._progress, mode="determinate", length=320, maximum=max(1, total))
+            self._pbar.pack(padx=12, pady=(0, 12))
+            self._progress.transient(self.winfo_toplevel())
+            self._progress.grab_set()
+            self._progress.update()
+        except Exception:
+            self._progress = None
+            self._pbar = None
+
+    def _tick_progress(self, value: int):
+        if getattr(self, "_pbar", None) is not None and getattr(self, "_progress", None) is not None:
+            try:
+                self._pbar["value"] = value
+                self._progress.update()
+            except Exception:
+                pass
+
+    def _close_progress(self):
+        if getattr(self, "_progress", None) is not None:
+            try:
+                self._progress.grab_release()
+                self._progress.destroy()
+            except Exception:
+                pass
+        self._progress = None
+        self._pbar = None
